@@ -56,7 +56,6 @@ defmodule Mighty.Preprocessing.Shared do
       doc: """
       If `true`, all non-zero counts are set to 1.
       This is useful for discrete probabilistic models that model binary events rather than integer counts.
-      Only applies if `analyzer` is not callable.
       """
     ],
     dtype: [
@@ -66,7 +65,6 @@ defmodule Mighty.Preprocessing.Shared do
       default: :f64,
       doc: """
       Type of the matrix returned by `fit_transform` or `transform`.
-      Only applies if `analyzer` is not callable.
       """
     ],
     tokenizer: [

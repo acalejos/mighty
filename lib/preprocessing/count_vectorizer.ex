@@ -109,13 +109,6 @@ defmodule Mighty.Preprocessing.CountVectorizer do
       |> Nx.indexed_put(idx_updates[[.., 0..1]], idx_updates[[.., 2]])
 
     tf =
-      if vectorizer.binary do
-        Nx.select(Nx.greater(tf, 0), 1, 0)
-      else
-        tf
-      end
-
-    tf =
       case vectorizer.max_features do
         nil ->
           tf
@@ -128,10 +121,59 @@ defmodule Mighty.Preprocessing.CountVectorizer do
           |> Nx.slice_along_axis(0, max_features, axis: 1)
       end
 
-    df =
-      Nx.select(Nx.greater(tf, 0), 1, 0)
-      |> Nx.mean(axes: [0])
+    tf =
+      if vectorizer.binary do
+        Nx.select(Nx.greater(tf, 0), 1, 0)
+      else
+        tf
+      end
 
-    {tf, df} |> dbg
+    df = Nx.select(Nx.greater(tf, 0), 1, 0)
+
+    max_cond =
+      case vectorizer.max_df do
+        max_df when is_integer(max_df) ->
+          Nx.less_equal(Nx.sum(df, axes: [0]), max_df)
+
+        max_df when is_float(max_df) ->
+          Nx.less_equal(Nx.mean(df, axes: [0]), max_df)
+
+        _ ->
+          raise ArgumentError, "max_df must be an integer or float in the range [0.0, 1.0]"
+      end
+
+    min_cond =
+      case vectorizer.min_df do
+        min_df when is_integer(min_df) ->
+          Nx.greater_equal(Nx.sum(df, axes: [0]), min_df)
+
+        min_df when is_float(min_df) ->
+          Nx.greater_equal(Nx.mean(df, axes: [0]), min_df)
+
+        _ ->
+          raise ArgumentError, "min_df must be an integer or float in the range [0.0, 1.0]"
+      end
+
+    df = Nx.mean(df, axes: [0])
+
+    true_values =
+      Nx.logical_and(
+        min_cond,
+        max_cond
+      )
+
+    true_indices = Nx.argsort(true_values, axis: 0, direction: :desc)
+
+    true_count = Nx.sum(true_values) |> Nx.to_number()
+
+    tf =
+      Nx.take(tf, true_indices, axis: 1)
+      |> Nx.slice_along_axis(0, true_count, axis: 1)
+
+    df =
+      Nx.take(df, true_indices, axis: 0)
+      |> Nx.slice_along_axis(0, true_count, axis: 0)
+
+    {tf, df}
   end
 end
