@@ -3,13 +3,12 @@ defmodule Mighty.Preprocessing.CountVectorizer do
             fixed_vocabulary: false,
             ngram_range: {1, 1},
             max_features: nil,
-            min_df: 1.0,
+            min_df: 1,
             max_df: 1.0,
             stop_words: [],
             binary: false,
             preprocessor: nil,
-            tokenizer: nil,
-            stop_words: []
+            tokenizer: nil
 
   defp make_ngrams(tokens, ngram_range) do
     {min_n, max_n} = ngram_range
@@ -116,10 +115,23 @@ defmodule Mighty.Preprocessing.CountVectorizer do
         tf
       end
 
+    tf =
+      case vectorizer.max_features do
+        nil ->
+          tf
+
+        max_features ->
+          tf
+          |> Nx.sum(axes: [0])
+          |> Nx.argsort(axis: 0, direction: :desc)
+          |> then(&Nx.take(tf, &1, axis: 1))
+          |> Nx.slice_along_axis(0, max_features, axis: 1)
+      end
+
     df =
       Nx.select(Nx.greater(tf, 0), 1, 0)
-      |> Nx.sum(axes: [0])
+      |> Nx.mean(axes: [0])
 
-    {tf, df}
+    {tf, df} |> dbg
   end
 end

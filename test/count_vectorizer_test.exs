@@ -15,6 +15,7 @@ defmodule CountVectorizerTest do
 
   test "builds vocab", context do
     vectorizer = Mighty.Preprocessing.CountVectorizer.new(context[:corpus]) |> IO.inspect()
+
     vocab_keys = vectorizer.vocabulary |> Map.keys() |> MapSet.new()
     {tf, df} = Mighty.Preprocessing.CountVectorizer.transform(vectorizer, context[:corpus])
     expected_x = ~M<

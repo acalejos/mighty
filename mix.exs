@@ -21,7 +21,7 @@ defmodule Mighty.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
-      {:nimble_options, "~> 0.1"},
+      {:nimble_options, "~> 1.0"},
       {:nx, "~> 0.6"}
     ]
   end

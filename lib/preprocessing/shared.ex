@@ -13,16 +13,16 @@ defmodule Mighty.Preprocessing.Shared do
       """
     ],
     max_features: [
-      type: :integer,
-      default: -1,
+      type: {:or, [:pos_integer, nil]},
+      default: nil,
       doc: """
       If not `nil`, build a vocabulary that only consider the top `max_features` ordered by term frequency across the corpus.
       This parameter is ignored if `vocabulary` is not `nil`.
       """
     ],
     min_df: [
-      type: {:custom, __MODULE__, :in_range, [:closed, 0, 1, :closed]},
-      default: 1.0,
+      type: {:or, [:non_neg_integer, {:custom, __MODULE__, :in_range, [:closed, 0, 1, :closed]}]},
+      default: 1,
       doc: """
       When building the vocabulary ignore terms that have a document frequency strictly lower than the given threshold.
       This value is also called cut-off in the literature.
@@ -31,7 +31,7 @@ defmodule Mighty.Preprocessing.Shared do
       """
     ],
     max_df: [
-      type: {:custom, __MODULE__, :in_range, [:closed, 0, 1, :closed]},
+      type: {:or, [:non_neg_integer, {:custom, __MODULE__, :in_range, [:closed, 0, 1, :closed]}]},
       default: 1.0,
       doc: """
       When building the vocabulary ignore terms that have a document frequency strictly higher than the given threshold.
