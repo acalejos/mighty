@@ -16,7 +16,7 @@ defmodule CountVectorizerTest do
   test "builds vocab", context do
     vectorizer = Mighty.Preprocessing.CountVectorizer.new(context[:corpus]) |> IO.inspect()
     vocab_keys = vectorizer.vocabulary |> Map.keys() |> MapSet.new()
-    array_x = Mighty.Preprocessing.CountVectorizer.transform(vectorizer, context[:corpus])
+    {tf, df} = Mighty.Preprocessing.CountVectorizer.transform(vectorizer, context[:corpus])
     expected_x = ~M<
     0 1 1 1 0 0 1 0 1
     0 2 0 1 0 1 1 0 1
@@ -24,7 +24,7 @@ defmodule CountVectorizerTest do
     0 1 1 1 0 0 1 0 1
     >
 
-    assert array_x == expected_x
+    assert tf == expected_x
 
     expected_keys =
       MapSet.new(["and", "document", "first", "is", "one", "second", "the", "third", "this"])
@@ -47,7 +47,7 @@ defmodule CountVectorizerTest do
     assert vectorizer.fixed_vocabulary == false
 
     vectorizer = Mighty.Preprocessing.CountVectorizer.new(context[:corpus], ngram_range: {2, 2})
-    array_x = Mighty.Preprocessing.CountVectorizer.transform(vectorizer, context[:corpus])
+    {tf, df} = Mighty.Preprocessing.CountVectorizer.transform(vectorizer, context[:corpus])
     expected_x = ~M<
     0 0 1 1 0 0 1 0 0 0 0 1 0
     0 1 0 1 0 1 0 1 0 0 1 0 0

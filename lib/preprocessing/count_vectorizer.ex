@@ -69,6 +69,15 @@ defmodule Mighty.Preprocessing.CountVectorizer do
     build_vocab(vectorizer, corpus)
   end
 
+  @doc """
+  Transforms a corpus into a term frequency matrix and a document frequency matrix.
+
+  The term frequency matrix is a matrix of shape (length(corpus), length(vocabulary) where each row
+  is a document and each column is a feature. It represents the count of each feature in each document.
+
+  The document frequency matrix is a vector of length (length(vocabulary)) where each element is the
+  number of documents that contain the feature at the corresponding index in the vocabulary.
+  """
   def transform(vectorizer = %__MODULE__{}, corpus) do
     idx_updates =
       corpus
@@ -96,7 +105,21 @@ defmodule Mighty.Preprocessing.CountVectorizer do
       |> Enum.reverse()
       |> Nx.tensor()
 
-    Nx.broadcast(0, {length(corpus), Enum.count(vectorizer.vocabulary)})
-    |> Nx.indexed_put(idx_updates[[.., 0..1]], idx_updates[[.., 2]])
+    tf =
+      Nx.broadcast(0, {length(corpus), Enum.count(vectorizer.vocabulary)})
+      |> Nx.indexed_put(idx_updates[[.., 0..1]], idx_updates[[.., 2]])
+
+    tf =
+      if vectorizer.binary do
+        Nx.select(Nx.greater(tf, 0), 1, 0)
+      else
+        tf
+      end
+
+    df =
+      Nx.select(Nx.greater(tf, 0), 1, 0)
+      |> Nx.sum(axes: [0])
+
+    {tf, df}
   end
 end
