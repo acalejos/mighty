@@ -12,10 +12,10 @@ defmodule Mighty.Preprocessing.TfidfVectorizer do
   ...> ]
   iex> vocabulary = ["this", "document", "first", "is", "second", "the",
   ...>               "and", "one"]
-  iex> vectorizer = Mighty.Preprocessing.TfidfVectorizer.new(corpus, vocabulary: vocabulary, norm: 2)
+  iex> vectorizer = Mighty.Preprocessing.TfidfVectorizer.new(corpus, vocabulary: vocabulary, norm: nil)
   iex> vectorizer.count_vectorizer.vocabulary |> Map.keys() |> Enum.sort()
   ["and", "document", "first", "is", "one", "second", "the", "this"]
-  iex> {tf, _df} = vectorizer.count_vectorizer |> Mighty.Preprocessing.CountVectorizer.transform(corpus)
+  iex> tf = vectorizer.count_vectorizer |> Mighty.Preprocessing.CountVectorizer.transform(corpus)
   iex> tf |> Nx.to_list()
   [
     [0, 1, 1, 1, 0, 0, 1, 1],
@@ -25,10 +25,10 @@ defmodule Mighty.Preprocessing.TfidfVectorizer do
   ]
   iex> Mighty.Preprocessing.TfidfVectorizer.transform(vectorizer, corpus) |> Nx.to_list()
   [
-    [0.0, 0.3364722366212129, 0.3364722366212129, 0.3364722366212129, 0.0, 0.0, 0.3364722366212129, 0.3364722366212129],
-    [0.0, 0.6731340946124258, 0.0, 0.22437803153747527, 0.0, 0.22437803153747527, 0.22437803153747527, 0.22437803153747527],
-    [0.4082482904638631, 0.0, 0.0, 0.4082482904638631, 0.4082482904638631, 0.0, 0.4082482904638631, 0.4082482904638631],
-    [0.0, 0.3364722366212129, 0.3364722366212129, 0.3364722366212129, 0.0, 0.0, 0.3364722366212129, 0.3364722366212129]
+    [0.0, 1.2231435775756836, 1.5108256340026855, 1.0, 0.0, 0.0, 1.0, 1.0],
+    [0.0, 2.446287155151367, 0.0, 1.0, 0.0, 1.9162907600402832, 1.0, 1.0],
+    [1.9162907600402832, 0.0, 0.0, 1.0, 1.9162907600402832, 0.0, 1.0, 1.0],
+    [0.0, 1.2231435775756836, 1.5108256340026855, 1.0, 0.0, 0.0, 1.0, 1.0]
   ]
   ```
   """
@@ -54,39 +54,54 @@ defmodule Mighty.Preprocessing.TfidfVectorizer do
     |> struct(tfidf_opts)
   end
 
-  # def transform(%Nx.Tensor{} = tf, %Nx.Tensor{} = df, opts \\ []) do
-  #   tfidf_opts = Shared.validate_tfidf!(tfidf_opts)
-  # end
-  # TODO: Allow passing TF+DF matrix or just Counts matrix -- add ability to directly use transform
-  def transform(%__MODULE__{count_vectorizer: count_vectorizer} = vectorizer, corpus) do
-    {tf, df} = CountVectorizer.transform(count_vectorizer, corpus)
+  def transform(source, opts \\ [])
+
+  def transform(%Nx.Tensor{} = tf, opts) do
+    opts = Shared.validate_tfidf!(opts)
+    df = Scholar.Preprocessing.binarize(tf) |> Nx.sum(axes: [0])
 
     idf =
-      if vectorizer.use_idf do
+      if opts[:use_idf] do
         {n_samples, _n_features} = Nx.shape(tf)
-        df = Nx.add(df, if(vectorizer.smooth_idf, do: 1, else: 0))
-        n_samples = if vectorizer.smooth_idf, do: n_samples + 1, else: n_samples
+        df = Nx.add(df, if(opts[:smooth_idf], do: 1, else: 0))
+        n_samples = if opts[:smooth_idf], do: n_samples + 1, else: n_samples
         Nx.divide(n_samples, df) |> Nx.log() |> Nx.add(1) |> Nx.make_diagonal() |> dbg
       end
 
     tf =
-      if vectorizer.sublinear_tf do
+      if opts[:sublinear_tf] do
         Nx.log(tf) |> Nx.add(1)
       else
         tf
       end
 
     tf =
-      if vectorizer.use_idf do
+      if opts[:use_idf] do
         Nx.dot(tf, idf)
       else
         tf
       end
 
-    # TODO: Handle Normalization
-    # (https://scikit-learn.org/stable/modules/preprocessing.html#preprocessing-normalization)
-    # (https://scikit-learn.org/stable/modules/generated/sklearn.preprocessing.normalize.html#sklearn.preprocessing.normalize)
+    tf =
+      case opts[:norm] do
+        nil -> tf
+        norm -> Scholar.Preprocessing.normalize(tf, norm: norm)
+      end
 
     tf
+  end
+
+  def transform(%__MODULE__{count_vectorizer: count_vectorizer} = vectorizer, corpus) do
+    tf = CountVectorizer.transform(count_vectorizer, corpus)
+
+    opts = Map.from_struct(vectorizer) |> Enum.into([])
+
+    {_general_opts, tfidf_opts} =
+      Keyword.split(
+        opts,
+        Shared.get_vectorizer_schema() |> Keyword.keys() |> Enum.concat([:count_vectorizer])
+      )
+
+    transform(tf, tfidf_opts)
   end
 end

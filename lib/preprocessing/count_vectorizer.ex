@@ -47,7 +47,7 @@ defmodule Mighty.Preprocessing.CountVectorizer do
   ...>   "Is this the first document"
   ...> ]
   iex> vectorizer = Mighty.Preprocessing.CountVectorizer.new(corpus)
-  iex> {tf, df} = Mighty.Preprocessing.CountVectorizer.transform(vectorizer, corpus)
+  iex> tf = Mighty.Preprocessing.CountVectorizer.transform(vectorizer, corpus)
   iex> tf |> Nx.to_list()
   [
     [0, 1, 1, 1, 0, 0, 1, 0, 1],
@@ -55,10 +55,8 @@ defmodule Mighty.Preprocessing.CountVectorizer do
     [1, 0, 0, 1, 1, 0, 1, 1, 1],
     [0, 1, 1, 1, 0, 0, 1, 0, 1]
   ]
-  iex> df |> Nx.to_list()
-  [0.25, 0.75, 0.5, 1.0, 0.25, 0.25, 1.0, 0.25, 1.0]
   iex> vectorizer = Mighty.Preprocessing.CountVectorizer.new(corpus, ngram_range: {2, 2})
-  iex> {tf, df} = Mighty.Preprocessing.CountVectorizer.transform(vectorizer, corpus)
+  iex> tf = Mighty.Preprocessing.CountVectorizer.transform(vectorizer, corpus)
   iex> tf |> Nx.to_list()
   [
     [0, 0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 1, 0],
@@ -66,10 +64,8 @@ defmodule Mighty.Preprocessing.CountVectorizer do
     [1, 0, 0, 1, 0, 0, 0, 0, 1, 1, 0, 1, 0],
     [0, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 1]
   ]
-  iex> df |> Nx.to_list()
-  [0.25, 0.25, 0.5, 0.75, 0.25, 0.25, 0.5, 0.25, 0.25, 0.25, 0.25, 0.5, 0.25]
   iex> vectorizer = Mighty.Preprocessing.CountVectorizer.new(corpus, max_features: 5, ngram_range: {1, 2}, min_df: 2, max_df: 0.8)
-  iex> {tf, df} = Mighty.Preprocessing.CountVectorizer.transform(vectorizer, corpus)
+  iex> tf = Mighty.Preprocessing.CountVectorizer.transform(vectorizer, corpus)
   iex> tf |> Nx.to_list()
   [
     [1, 1],
@@ -77,8 +73,6 @@ defmodule Mighty.Preprocessing.CountVectorizer do
     [0, 1],
     [1, 0]
   ]
-  iex> df |> Nx.to_list()
-  [0.75, 0.75]
   ```
   """
   defstruct vocabulary: nil,
@@ -212,7 +206,7 @@ defmodule Mighty.Preprocessing.CountVectorizer do
         tf
       end
 
-    df = Nx.select(Nx.greater(tf, 0), 1, 0)
+    df = Scholar.Preprocessing.binarize(tf)
 
     # When max_df or min_df is a float, it is interpreted as a proportion of the total number of documents,
     # so we use the mean of the document frequencies to compare against the max_df or min_df.
@@ -243,8 +237,6 @@ defmodule Mighty.Preprocessing.CountVectorizer do
           raise ArgumentError, "min_df must be an integer or float in the range [0.0, 1.0]"
       end
 
-    df = Nx.mean(df, axes: [0])
-
     true_values =
       Nx.logical_and(
         min_cond,
@@ -259,10 +251,6 @@ defmodule Mighty.Preprocessing.CountVectorizer do
       Nx.take(tf, true_indices, axis: 1)
       |> Nx.slice_along_axis(0, true_count, axis: 1)
 
-    df =
-      Nx.take(df, true_indices, axis: 0)
-      |> Nx.slice_along_axis(0, true_count, axis: 0)
-
-    {tf, df}
+    tf
   end
 end

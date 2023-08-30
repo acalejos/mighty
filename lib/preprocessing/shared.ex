@@ -98,10 +98,12 @@ defmodule Mighty.Preprocessing.Shared do
 
   tfidf_schema_opts = [
     norm: [
-      type: {:in, [nil, :l1, :l2, 1, 2]},
-      default: 2,
+      type: {:in, [nil, :euclidean, :manhattan, :chebyshev]},
+      default: :euclidean,
       doc: """
       Norm used to normalize term vectors. If `nil`, no normalization is applied.
+      Valid options are the same as Scholar.Preprocessing.normalize/2.
+      See https://hexdocs.pm/scholar/Scholar.Preprocessing.html#normalize/2
       """
     ],
     use_idf: [
