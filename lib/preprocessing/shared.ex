@@ -6,10 +6,9 @@ defmodule Mighty.Preprocessing.Shared do
       default: {1, 1},
       doc: """
       The lower and upper boundary of the range of n-values for different n-grams to be extracted.
-      All values of n such that min_n <= n <= max_n will be used.
+      All values of $n$ such that $min_n <= n <= max_n$ will be used.
       For example an `ngram_range` of `{1, 1}` means only unigrams, `{1, 2}` means unigrams and bigrams,
       and `{2, 2}` means only bigrams.
-      Only applies if `analyzer` is not callable.
       """
     ],
     max_features: [
@@ -97,18 +96,49 @@ defmodule Mighty.Preprocessing.Shared do
     ]
   ]
 
-  tfidf_schema = [
+  tfidf_schema_opts = [
     norm: [
-      type: {:in, [:l1, :l2, nil]},
-      default: :l2,
+      type: {:in, [nil, :l1, :l2, 1, 2]},
+      default: 2,
       doc: """
-      Norm used to normalize term vectors.
+      Norm used to normalize term vectors. If `nil`, no normalization is applied.
+      """
+    ],
+    use_idf: [
+      type: :boolean,
+      default: true,
+      doc: ~S"""
+      Enable inverse-document-frequency reweighting.
+      If false, $idf(t) = 1$.
+      """
+    ],
+    smooth_idf: [
+      type: :boolean,
+      default: true,
+      doc: """
+      Smooth idf weights by adding one to document frequencies, as if an extra document was seen containing every term in the collection exactly once.
+      Prevents zero divisions.
+      """
+    ],
+    sublinear_tf: [
+      type: :boolean,
+      default: false,
+      doc: ~S"""
+      Apply sublinear tf scaling, i.e. replace tf with $1 + \log(tf)$.
       """
     ]
   ]
 
   @vectorizer_schema NimbleOptions.new!(vectorizer_schema_opts)
-  @tfidf_schema NimbleOptions.new!(vectorizer_schema_opts ++ tfidf_schema)
+  @tfidf_schema NimbleOptions.new!(vectorizer_schema_opts ++ tfidf_schema_opts)
+
+  def get_vectorizer_schema() do
+    @vectorizer_schema.schema
+  end
+
+  def get_tfidf_schema() do
+    @tfidf_schema.schema
+  end
 
   def validate_vocabulary(vocabulary) do
     case vocabulary do

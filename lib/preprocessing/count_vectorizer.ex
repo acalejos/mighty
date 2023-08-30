@@ -1,24 +1,24 @@
 defmodule Mighty.Preprocessing.CountVectorizer do
-  @moduledoc """
-  A CountVectorizer contains performs a transform function that converts a corpus into a
-  term frequency matrix and a document frequency matrix.
+  @moduledoc ~S"""
+  A `CountVectorizer` contains performs a `transform/2` function that converts a corpus into a
+  term frequency (TF) matrix and a document frequency (DF) matrix.
 
-  The term frequency matrix is a matrix of shape (length(corpus), length(vocabulary) where each row
+  The term frequency matrix is a matrix of shape $\lvert$ corpus $\rvert \times \lvert$ vocabulary $\rvert$ where each row
   is a document and each column is a feature. It represents the count of each feature in each document.
-  The document frequency matrix is a vector of length (length(vocabulary)) where each element is the
+  The document frequency matrix is a vector of length $\lvert$ vocabulary $\rvert$ where each element is the
   number of documents that contain the feature at the corresponding index in the vocabulary divided by the
   number of documents in the corpus (hence the term 'frequency').
 
-  ## Creating a CountVectorizer
+  ## Creating a `CountVectorizer`
 
   There are a number of different options that can be used to control the vocabulary that is built from the corpus
   as well as control the features that are included in the term frequency matrix. You can provide your own vocabulary
-  or you can let the CountVectorizer build the vocabulary from the corpus. If you provide your own vocabulary, you
+  or you can let the `CountVectorizer` build the vocabulary from the corpus. If you provide your own vocabulary, you
   must pass the vocabulary as a list, MapSet, or Map. If you pass a list or MapSet, they must contain strings that
   represent the desired tokens in your vocabulary. If you provide a Map, the keys must be strings that represent the
   desired tokens in your vocabulary and the values must be integers that represent the index of the token in the
   vocabulary. The indices must be consecutive integers from 0..length(vocabulary). If you do not provide your own vocabulary,
-  the CountVectorizer will build the vocabulary from the corpus using the `preprocessor` and `tokenizer` options. The
+  the `CountVectorizer` will build the vocabulary from the corpus using the `preprocessor` and `tokenizer` options. The
   `preprocessor` option is a function that takes a string and returns a string. The `tokenizer` option is a function
   that takes a string and returns a list of strings. The `preprocessor` function is applied to each document in the corpus
   before the `tokenizer` function is applied to each document in the corpus. The `tokenizer` function is applied to each
@@ -79,9 +79,9 @@ defmodule Mighty.Preprocessing.CountVectorizer do
   ]
   iex> df |> Nx.to_list()
   [0.75, 0.75]
+  ```
   """
   defstruct vocabulary: nil,
-            fixed_vocabulary: false,
             ngram_range: {1, 1},
             max_features: nil,
             min_df: 1,
@@ -118,7 +118,7 @@ defmodule Mighty.Preprocessing.CountVectorizer do
     end)
   end
 
-  def build_vocab(vectorizer, corpus) do
+  defp build_vocab(vectorizer, corpus) do
     vocabulary =
       case vectorizer.vocabulary do
         nil ->
@@ -144,10 +144,9 @@ defmodule Mighty.Preprocessing.CountVectorizer do
   """
   def new(corpus, opts \\ []) do
     opts = Mighty.Preprocessing.Shared.validate_shared!(opts)
-    fixed_vocab = if is_nil(opts[:vocabulary]), do: false, else: true
     # TODO: Any opts that are not needed for building the vocab should be moved from
     # new/2 to transform/2. Should those be stored in the struct?
-    vectorizer = %__MODULE__{fixed_vocabulary: fixed_vocab} |> struct(opts)
+    vectorizer = struct(__MODULE__, opts)
     build_vocab(vectorizer, corpus)
   end
 
@@ -180,6 +179,8 @@ defmodule Mighty.Preprocessing.CountVectorizer do
               end
             end
           )
+          # Filter OOV tokens
+          |> Enum.filter(fn {k, _v} -> not is_nil(Map.get(vectorizer.vocabulary, k)) end)
           |> Enum.map(fn {k, v} -> [doc_idx, Map.get(vectorizer.vocabulary, k), v] end)
 
         counts ++ accum
@@ -262,6 +263,6 @@ defmodule Mighty.Preprocessing.CountVectorizer do
       Nx.take(df, true_indices, axis: 0)
       |> Nx.slice_along_axis(0, true_count, axis: 0)
 
-    {tf, df} |> dbg
+    {tf, df}
   end
 end
