@@ -1,5 +1,6 @@
 defmodule CountVectorizerTest do
   use ExUnit.Case
+  doctest Mighty.Preprocessing.CountVectorizer
   import Nx, only: :sigils
 
   setup do

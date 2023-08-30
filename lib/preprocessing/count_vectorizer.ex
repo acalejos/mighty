@@ -1,4 +1,85 @@
 defmodule Mighty.Preprocessing.CountVectorizer do
+  @moduledoc """
+  A CountVectorizer contains performs a transform function that converts a corpus into a
+  term frequency matrix and a document frequency matrix.
+
+  The term frequency matrix is a matrix of shape (length(corpus), length(vocabulary) where each row
+  is a document and each column is a feature. It represents the count of each feature in each document.
+  The document frequency matrix is a vector of length (length(vocabulary)) where each element is the
+  number of documents that contain the feature at the corresponding index in the vocabulary divided by the
+  number of documents in the corpus (hence the term 'frequency').
+
+  ## Creating a CountVectorizer
+
+  There are a number of different options that can be used to control the vocabulary that is built from the corpus
+  as well as control the features that are included in the term frequency matrix. You can provide your own vocabulary
+  or you can let the CountVectorizer build the vocabulary from the corpus. If you provide your own vocabulary, you
+  must pass the vocabulary as a list, MapSet, or Map. If you pass a list or MapSet, they must contain strings that
+  represent the desired tokens in your vocabulary. If you provide a Map, the keys must be strings that represent the
+  desired tokens in your vocabulary and the values must be integers that represent the index of the token in the
+  vocabulary. The indices must be consecutive integers from 0..length(vocabulary). If you do not provide your own vocabulary,
+  the CountVectorizer will build the vocabulary from the corpus using the `preprocessor` and `tokenizer` options. The
+  `preprocessor` option is a function that takes a string and returns a string. The `tokenizer` option is a function
+  that takes a string and returns a list of strings. The `preprocessor` function is applied to each document in the corpus
+  before the `tokenizer` function is applied to each document in the corpus. The `tokenizer` function is applied to each
+  document in the corpus before the ngrams are generated. The `ngram_range` option controls the ngrams that are generated
+  from the tokens. The `ngram_range` option must be a tuple of integers where the first integer is the minimum ngram length
+  and the second integer is the maximum ngram length. All ngrams between your max and min ngram range will be generated,
+  meaning `ngram_range: {1,1}` will generate only unigrams, `ngram_range: {2,2}` will only generate bigrams, and
+  `ngram_range: {1,2}` will generate both unigrams and bigrams. The `stop_words` option is a list of strings that represent tokens
+  that should be removed from the corpus before the vocabulary is built. The `binary` option controls whether the term frequency
+  matrix is binary or not. If `binary` is `true`, all non-zero counts are set to 1. This is useful for discrete probabilistic
+  models that model binary events rather than integer counts.
+
+  Control the number of features that are included in the term frequency matrix by setting the `max_features` option.
+  Control the minimum and maximum document frequency of the features that are included in the term frequency matrix by setting
+  the `min_df` and `max_df` options. Control the ngram range of the features that are included in the term frequency
+  matrix by setting the `ngram_range` option. Control whether the term frequency matrix is binary or not
+  by setting the `binary` option.
+
+  ## Examples
+
+  ```elixir
+  iex> corpus = [
+  ...>   "This is the first document",
+  ...>   "This document is the second document",
+  ...>   "And this is the third one",
+  ...>   "Is this the first document"
+  ...> ]
+  iex> vectorizer = Mighty.Preprocessing.CountVectorizer.new(corpus)
+  iex> {tf, df} = Mighty.Preprocessing.CountVectorizer.transform(vectorizer, corpus)
+  iex> tf |> Nx.to_list()
+  [
+    [0, 1, 1, 1, 0, 0, 1, 0, 1],
+    [0, 2, 0, 1, 0, 1, 1, 0, 1],
+    [1, 0, 0, 1, 1, 0, 1, 1, 1],
+    [0, 1, 1, 1, 0, 0, 1, 0, 1]
+  ]
+  iex> df |> Nx.to_list()
+  [0.25, 0.75, 0.5, 1.0, 0.25, 0.25, 1.0, 0.25, 1.0]
+  iex> vectorizer = Mighty.Preprocessing.CountVectorizer.new(corpus, ngram_range: {2, 2})
+  iex> {tf, df} = Mighty.Preprocessing.CountVectorizer.transform(vectorizer, corpus)
+  iex> tf |> Nx.to_list()
+  [
+    [0, 0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 1, 0],
+    [0, 1, 0, 1, 0, 1, 0, 1, 0, 0, 1, 0, 0],
+    [1, 0, 0, 1, 0, 0, 0, 0, 1, 1, 0, 1, 0],
+    [0, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 1]
+  ]
+  iex> df |> Nx.to_list()
+  [0.25, 0.25, 0.5, 0.75, 0.25, 0.25, 0.5, 0.25, 0.25, 0.25, 0.25, 0.5, 0.25]
+  iex> vectorizer = Mighty.Preprocessing.CountVectorizer.new(corpus, max_features: 5, ngram_range: {1, 2}, min_df: 2, max_df: 0.8)
+  iex> {tf, df} = Mighty.Preprocessing.CountVectorizer.transform(vectorizer, corpus)
+  iex> tf |> Nx.to_list()
+  [
+    [1, 1],
+    [2, 1],
+    [0, 1],
+    [1, 0]
+  ]
+  iex> df |> Nx.to_list()
+  [0.75, 0.75]
+  """
   defstruct vocabulary: nil,
             fixed_vocabulary: false,
             ngram_range: {1, 1},
@@ -64,6 +145,8 @@ defmodule Mighty.Preprocessing.CountVectorizer do
   def new(corpus, opts \\ []) do
     opts = Mighty.Preprocessing.Shared.validate_shared!(opts)
     fixed_vocab = if is_nil(opts[:vocabulary]), do: false, else: true
+    # TODO: Any opts that are not needed for building the vocab should be moved from
+    # new/2 to transform/2. Should those be stored in the struct?
     vectorizer = %__MODULE__{fixed_vocabulary: fixed_vocab} |> struct(opts)
     build_vocab(vectorizer, corpus)
   end
@@ -130,6 +213,11 @@ defmodule Mighty.Preprocessing.CountVectorizer do
 
     df = Nx.select(Nx.greater(tf, 0), 1, 0)
 
+    # When max_df or min_df is a float, it is interpreted as a proportion of the total number of documents,
+    # so we use the mean of the document frequencies to compare against the max_df or min_df.
+
+    # When max_df or min_df is an integer, it is interpreted as an absolute count, so we use the sum of the
+    # document frequencies to compare against the max_df or min_df.
     max_cond =
       case vectorizer.max_df do
         max_df when is_integer(max_df) ->
@@ -174,6 +262,6 @@ defmodule Mighty.Preprocessing.CountVectorizer do
       Nx.take(df, true_indices, axis: 0)
       |> Nx.slice_along_axis(0, true_count, axis: 0)
 
-    {tf, df}
+    {tf, df} |> dbg
   end
 end
