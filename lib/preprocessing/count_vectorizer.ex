@@ -90,13 +90,12 @@ defmodule Mighty.Preprocessing.CountVectorizer do
     n_original_tokens = length(tokens)
 
     ngrams =
-      for n <- min_n..min(max_n, n_original_tokens) do
-        for i <- 0..(n_original_tokens - n) do
-          Enum.slice(tokens, i, n) |> Enum.join(" ")
-        end
+      for n <- min_n..min(max_n, n_original_tokens),
+          i <- 0..(n_original_tokens - n) do
+        Enum.slice(tokens, i, n) |> Enum.join(" ")
       end
 
-    ngrams |> Enum.flat_map(& &1)
+    ngrams
   end
 
   defp do_process(vectorizer = %__MODULE__{}, doc) do
@@ -154,37 +153,45 @@ defmodule Mighty.Preprocessing.CountVectorizer do
   number of documents that contain the feature at the corresponding index in the vocabulary.
   """
   def transform(vectorizer = %__MODULE__{}, corpus) do
-    idx_updates =
-      corpus
-      |> Enum.with_index()
-      |> Enum.reduce([], fn {doc, doc_idx}, accum ->
-        counts =
-          doc
-          |> then(&do_process(vectorizer, &1))
-          |> Enum.reduce(
-            Enum.map(vectorizer.vocabulary, fn {k, _} -> {k, 0} end) |> Enum.into(%{}),
-            fn token, acc ->
-              case Map.get(acc, token) do
-                nil ->
-                  Map.put(acc, token, 1)
-
-                count ->
-                  Map.put(acc, token, count + 1)
-              end
-            end
-          )
-          # Filter OOV tokens
-          |> Enum.filter(fn {k, _v} -> not is_nil(Map.get(vectorizer.vocabulary, k)) end)
-          |> Enum.map(fn {k, v} -> [doc_idx, Map.get(vectorizer.vocabulary, k), v] end)
-
-        counts ++ accum
-      end)
-      |> Enum.reverse()
-      |> Nx.tensor()
+    tf = Nx.broadcast(0, {length(corpus), Enum.count(vectorizer.vocabulary)})
 
     tf =
-      Nx.broadcast(0, {length(corpus), Enum.count(vectorizer.vocabulary)})
-      |> Nx.indexed_put(idx_updates[[.., 0..1]], idx_updates[[.., 2]])
+      corpus
+      |> Enum.with_index()
+      |> Enum.chunk_every(1000)
+      |> Enum.reduce(tf, fn chunk, acc ->
+        Task.async_stream(
+          chunk,
+          fn {doc, doc_idx} ->
+            doc
+            |> then(&do_process(vectorizer, &1))
+            |> Enum.reduce(
+              Map.new(vectorizer.vocabulary, fn {k, _} -> {k, 0} end),
+              fn token, acc ->
+                Map.update(acc, token, 1, &(&1 + 1))
+              end
+            )
+            |> Enum.map(fn {k, v} ->
+              case Map.get(vectorizer.vocabulary, k) do
+                nil -> nil
+                _ when v == 0 -> nil
+                idx -> [doc_idx, idx, v]
+              end
+            end)
+          end,
+          timeout: :infinity
+        )
+        |> Enum.reduce({[], []}, fn
+          {:ok, iter_result}, acc ->
+            Enum.reduce(iter_result, acc, fn
+              nil, acc -> acc
+              [x, y, z], {idx, upd} -> {[[x, y] | idx], [z | upd]}
+            end)
+        end)
+        |> then(fn {idx, upd} ->
+          Nx.indexed_put(acc, Nx.tensor(idx), Nx.tensor(upd))
+        end)
+      end)
 
     tf =
       case vectorizer.max_features do

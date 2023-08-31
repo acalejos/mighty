@@ -54,7 +54,7 @@ defmodule Mighty.Preprocessing.TfidfVectorizer do
     |> struct(tfidf_opts)
   end
 
-  def transform(source, opts \\ [])
+  def transform(source, opts_or_corpus \\ [])
 
   def transform(%Nx.Tensor{} = tf, opts) do
     opts = Shared.validate_tfidf!(opts)
@@ -65,19 +65,19 @@ defmodule Mighty.Preprocessing.TfidfVectorizer do
         {n_samples, _n_features} = Nx.shape(tf)
         df = Nx.add(df, if(opts[:smooth_idf], do: 1, else: 0))
         n_samples = if opts[:smooth_idf], do: n_samples + 1, else: n_samples
-        Nx.divide(n_samples, df) |> Nx.log() |> Nx.add(1) |> Nx.make_diagonal() |> dbg
+        Nx.divide(n_samples, df) |> Nx.log() |> Nx.add(1)
       end
 
     tf =
       if opts[:sublinear_tf] do
-        Nx.log(tf) |> Nx.add(1)
+        Nx.select(Nx.equal(tf, 0), 0, Nx.log(tf) |> Nx.add(1))
       else
         tf
       end
 
     tf =
       if opts[:use_idf] do
-        Nx.dot(tf, idf)
+        Nx.multiply(tf, idf)
       else
         tf
       end
