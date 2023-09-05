@@ -1,6 +1,7 @@
 defmodule CountVectorizerTest do
   use ExUnit.Case
   doctest Mighty.Preprocessing.CountVectorizer
+  alias Mighty.Preprocessing.CountVectorizer
   import Nx, only: :sigils
 
   setup do
@@ -15,10 +16,12 @@ defmodule CountVectorizerTest do
   end
 
   test "builds vocab", context do
-    vectorizer = Mighty.Preprocessing.CountVectorizer.new(context[:corpus]) |> IO.inspect()
+    vectorizer =
+      CountVectorizer.new()
+      |> CountVectorizer.fit(context[:corpus])
 
     vocab_keys = vectorizer.vocabulary |> Map.keys() |> MapSet.new()
-    tf = Mighty.Preprocessing.CountVectorizer.transform(vectorizer, context[:corpus])
+    tf = CountVectorizer.transform(vectorizer, context[:corpus])
     expected_x = ~M<
     0 1 1 1 0 0 1 0 1
     0 2 0 1 0 1 1 0 1
@@ -47,17 +50,20 @@ defmodule CountVectorizerTest do
 
     assert vectorizer.vocabulary == expected_vocab
 
-    vectorizer = Mighty.Preprocessing.CountVectorizer.new(context[:corpus], ngram_range: {2, 2})
-    tf = Mighty.Preprocessing.CountVectorizer.transform(vectorizer, context[:corpus])
+    vectorizer =
+      CountVectorizer.new(ngram_range: {2, 2})
+      |> CountVectorizer.fit(context[:corpus])
+
+    tf = CountVectorizer.transform(vectorizer, context[:corpus])
     expected_x = ~M<
     0 0 1 1 0 0 1 0 0 0 0 1 0
     0 1 0 1 0 1 0 1 0 0 1 0 0
     1 0 0 1 0 0 0 0 1 1 0 1 0
     0 0 1 0 1 0 1 0 0 0 0 0 1
     >
+    assert tf == expected_x
 
-    expected_x =
-      expected_vocab =
+    expected_vocab =
       MapSet.new([
         "and this",
         "document is",

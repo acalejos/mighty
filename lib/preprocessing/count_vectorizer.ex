@@ -40,14 +40,14 @@ defmodule Mighty.Preprocessing.CountVectorizer do
   ## Examples
 
   ```elixir
+  iex> alias Mighty.Preprocessing.CountVectorizer, as: CV
   iex> corpus = [
   ...>   "This is the first document",
   ...>   "This document is the second document",
   ...>   "And this is the third one",
   ...>   "Is this the first document"
   ...> ]
-  iex> vectorizer = Mighty.Preprocessing.CountVectorizer.new(corpus)
-  iex> tf = Mighty.Preprocessing.CountVectorizer.transform(vectorizer, corpus)
+  iex> {_,tf} = CV.new() |> CV.fit_transform(corpus)
   iex> tf |> Nx.to_list()
   [
     [0, 1, 1, 1, 0, 0, 1, 0, 1],
@@ -55,8 +55,7 @@ defmodule Mighty.Preprocessing.CountVectorizer do
     [1, 0, 0, 1, 1, 0, 1, 1, 1],
     [0, 1, 1, 1, 0, 0, 1, 0, 1]
   ]
-  iex> vectorizer = Mighty.Preprocessing.CountVectorizer.new(corpus, ngram_range: {2, 2})
-  iex> tf = Mighty.Preprocessing.CountVectorizer.transform(vectorizer, corpus)
+  iex> {_,tf} = CV.new(ngram_range: {2, 2}) |> CV.fit_transform(corpus)
   iex> tf |> Nx.to_list()
   [
     [0, 0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 1, 0],
@@ -64,17 +63,29 @@ defmodule Mighty.Preprocessing.CountVectorizer do
     [1, 0, 0, 1, 0, 0, 0, 0, 1, 1, 0, 1, 0],
     [0, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 1]
   ]
-  iex> vectorizer = Mighty.Preprocessing.CountVectorizer.new(corpus, max_features: 5, ngram_range: {1, 2}, min_df: 2, max_df: 0.8)
-  iex> tf = Mighty.Preprocessing.CountVectorizer.transform(vectorizer, corpus)
+  iex> {vec, tf} = CV.new(max_features: 5, ngram_range: {1, 2}, min_df: 2, max_df: 0.8) |> CV.fit_transform(corpus)
   iex> tf |> Nx.to_list()
   [
-    [1, 1],
-    [2, 1],
-    [0, 1],
-    [1, 0]
+    [1, 1, 1, 1, 1],
+    [2, 0, 0, 1, 0],
+    [0, 0, 0, 1, 0],
+    [1, 1, 1, 0, 1]
   ]
+  iex> vec.vocabulary
+  %{
+   "document" => 0,
+   "first" => 1,
+   "first document" => 2,
+   "is the" => 3,
+   "the first" => 4
+  }
+  iex> vec.pruned
+  MapSet.new(["and", "and this", "document is", "is", "is this", "one", "second",
+  "second document", "the", "the second", "the third", "third", "third one",
+  "this", "this document", "this is", "this the"])
   ```
   """
+
   defstruct vocabulary: nil,
             ngram_range: {1, 1},
             max_features: nil,
@@ -83,7 +94,8 @@ defmodule Mighty.Preprocessing.CountVectorizer do
             stop_words: [],
             binary: false,
             preprocessor: nil,
-            tokenizer: nil
+            tokenizer: nil,
+            pruned: nil
 
   defp make_ngrams(tokens, ngram_range) do
     {min_n, max_n} = ngram_range
@@ -132,79 +144,212 @@ defmodule Mighty.Preprocessing.CountVectorizer do
   end
 
   @doc """
-  Creates a new CountVectorizer.
-  Fits the vocabulary on the corpus if no vocabulary is provided.
+  Creates a new CountVectorizer with the given options.
+
+  Returns the new CountVectorizer.
   """
-  def new(corpus, opts \\ []) do
+  def new(opts \\ []) do
     opts = Mighty.Preprocessing.Shared.validate_shared!(opts)
-    # TODO: Any opts that are not needed for building the vocab should be moved from
-    # new/2 to transform/2. Should those be stored in the struct?
-    vectorizer = struct(__MODULE__, opts)
-    build_vocab(vectorizer, corpus)
+    struct(__MODULE__, opts)
+  end
+
+  defp where_columns(condition = %Nx.Tensor{shape: {_cond_len}}) do
+    count = Nx.sum(condition) |> Nx.to_number()
+    Nx.argsort(condition, direction: :desc) |> Nx.slice_along_axis(0, count, axis: 0)
+  end
+
+  defp limit_features(
+         vectorizer = %__MODULE__{},
+         tf = %Nx.Tensor{},
+         df = %Nx.Tensor{shape: {df_len}},
+         high,
+         low,
+         limit
+       ) do
+    mask = Nx.broadcast(1, {df_len})
+    mask = if high, do: Nx.logical_and(mask, Nx.less_equal(df, high)), else: mask
+    mask = if low, do: Nx.logical_and(mask, Nx.greater_equal(df, low)), else: mask
+
+    limit =
+      case limit do
+        0 ->
+          limit
+
+        nil ->
+          limit
+
+        _ ->
+          limit - 1
+      end
+
+    mask =
+      if limit && Nx.greater(Nx.sum(mask), limit) do
+        tfs = Nx.sum(tf, axes: [0]) |> Nx.flatten()
+        orig_mask_inds = where_columns(mask)
+        mask_inds = Nx.argsort(Nx.take(tfs, orig_mask_inds) |> Nx.multiply(-1))[0..limit]
+        new_mask = Nx.broadcast(0, {df_len})
+        new_indices = Nx.take(orig_mask_inds, mask_inds) |> Nx.new_axis(1)
+        new_updates = Nx.broadcast(1, {Nx.flat_size(new_indices)})
+        new_mask = Nx.indexed_put(new_mask, new_indices, new_updates)
+
+        new_mask
+      else
+        mask
+      end
+
+    new_indices = mask |> Nx.flatten() |> Nx.cumulative_sum() |> Nx.subtract(1)
+
+    {new_vocab, removed_terms} =
+      Enum.reduce(vectorizer.vocabulary, {%{}, MapSet.new([])}, fn {term, old_index},
+                                                                   {vocab_acc, removed_acc} ->
+        case Nx.to_number(mask[old_index]) do
+          1 ->
+            {Map.put(vocab_acc, term, Nx.to_number(new_indices[old_index])), removed_acc}
+
+          _ ->
+            {vocab_acc, MapSet.put(removed_acc, term)}
+        end
+      end)
+
+    kept_indices = where_columns(mask)
+    I
+
+    if Nx.flat_size(kept_indices) == 0 do
+      raise "After pruning, no terms remain. Try a lower min_df or a higher max_df."
+    end
+
+    tf = Nx.take(tf, kept_indices, axis: 1)
+    {tf, new_vocab, removed_terms}
   end
 
   @doc """
-  Transforms a corpus into a term frequency matrix and a document frequency matrix.
+  Fits a CountVectorizer to a corpus.
 
-  The term frequency matrix is a matrix of shape (length(corpus), length(vocabulary) where each row
-  is a document and each column is a feature. It represents the count of each feature in each document.
+  The CountVectorizer will build a vocabulary from the corpus using the `preprocessor` and `tokenizer` options.
+  The vocabulary will then be modified according to the `max_features`, `min_df`, and `max_df` options, which
+  effectively filter out features from the vocabulary. Those options must have been set when the CountVectorizer
+  was created with `CountVectorizer.new/1`.
 
-  The document frequency matrix is a vector of length (length(vocabulary)) where each element is the
-  number of documents that contain the feature at the corresponding index in the vocabulary.
+  If you wish to fit a CountVectorizer to a corpus and then transform a different corpus using the same vocabulary,
+  you can use `CountVectorizer.fit/2` to fit the CountVectorizer to the first corpus and then use `CountVectorizer.transform/2`
+  to transform the second corpus using the same vocabulary.
+
+  If, however, you wish to fit a CountVectorizer to a corpus and then transform the same corpus using the same vocabulary,
+  it is recommended to use `CountVectorizer.fit_transform/2` to fit the CountVectorizer to the corpus and then transform the corpus
+  using the same vocabulary. You may still pipe the output of `CountVectorizer.fit/2` into `CountVectorizer.transform/2`, but
+  `CountVectorizer.fit_transform/2` is more efficient since the Term-Framquency matrix is computed during the fitting process
+  and is not recomputed during the transformation process.
+
+
+  Returns the new CountVectorizer.
+  """
+  def fit(vectorizer = %__MODULE__{}, corpus) do
+    vectorizer = build_vocab(vectorizer, corpus)
+
+    n_doc = length(corpus)
+    tf = _transform(vectorizer, corpus, n_doc)
+
+    df = Scholar.Preprocessing.binarize(tf) |> Nx.sum(axes: [0])
+
+    max_doc_count =
+      if is_float(vectorizer.max_df), do: vectorizer.max_df * n_doc, else: vectorizer.max_df
+
+    min_doc_count =
+      if is_float(vectorizer.min_df), do: vectorizer.min_df * n_doc, else: vectorizer.min_df
+
+    {_, new_vocab, removed_terms} =
+      limit_features(vectorizer, tf, df, max_doc_count, min_doc_count, vectorizer.max_features)
+
+    struct(vectorizer, vocabulary: new_vocab, pruned: removed_terms)
+  end
+
+  defp _transform(vectorizer = %__MODULE__{}, corpus, n_doc) do
+    if is_nil(vectorizer.vocabulary) do
+      raise "CountVectorizer must be fit to a corpus before transforming the corpus. Use CountVectorizer.fit/2 or CountVectorizer.fit_transform/2 to fit the CountVectorizer to a corpus."
+    end
+
+    tf = Nx.broadcast(0, {n_doc, Enum.count(vectorizer.vocabulary)})
+
+    corpus
+    |> Enum.with_index()
+    |> Enum.chunk_every(1000)
+    |> Enum.reduce(tf, fn chunk, acc ->
+      Task.async_stream(
+        chunk,
+        fn {doc, doc_idx} ->
+          doc
+          |> then(&do_process(vectorizer, &1))
+          |> Enum.reduce(
+            Map.new(vectorizer.vocabulary, fn {k, _} -> {k, 0} end),
+            fn token, acc ->
+              Map.update(acc, token, 1, &(&1 + 1))
+            end
+          )
+          |> Enum.map(fn {k, v} ->
+            case Map.get(vectorizer.vocabulary, k) do
+              nil -> nil
+              _ when v == 0 -> nil
+              idx -> [doc_idx, idx, v]
+            end
+          end)
+        end,
+        timeout: :infinity
+      )
+      |> Enum.reduce({[], []}, fn
+        {:ok, iter_result}, acc ->
+          Enum.reduce(iter_result, acc, fn
+            nil, acc -> acc
+            [x, y, z], {idx, upd} -> {[[x, y] | idx], [z | upd]}
+          end)
+      end)
+      |> then(fn {idx, upd} ->
+        Nx.indexed_put(acc, Nx.tensor(idx), Nx.tensor(upd))
+      end)
+    end)
+  end
+
+  @doc """
+  Given a `CountVectorizer`, transforms a corpus into a term frequency matrix. The `CountVectorizer` must have been
+  fit to a corpus using `CountVectorizer.fit/2` or `CountVectorizer.fit_transform/2` before calling this function.
+
+  Returns the term frequency matrix.
   """
   def transform(vectorizer = %__MODULE__{}, corpus) do
-    tf = Nx.broadcast(0, {length(corpus), Enum.count(vectorizer.vocabulary)})
+    n_doc = length(corpus)
+    tf = _transform(vectorizer, corpus, n_doc)
 
-    tf =
-      corpus
-      |> Enum.with_index()
-      |> Enum.chunk_every(1000)
-      |> Enum.reduce(tf, fn chunk, acc ->
-        Task.async_stream(
-          chunk,
-          fn {doc, doc_idx} ->
-            doc
-            |> then(&do_process(vectorizer, &1))
-            |> Enum.reduce(
-              Map.new(vectorizer.vocabulary, fn {k, _} -> {k, 0} end),
-              fn token, acc ->
-                Map.update(acc, token, 1, &(&1 + 1))
-              end
-            )
-            |> Enum.map(fn {k, v} ->
-              case Map.get(vectorizer.vocabulary, k) do
-                nil -> nil
-                _ when v == 0 -> nil
-                idx -> [doc_idx, idx, v]
-              end
-            end)
-          end,
-          timeout: :infinity
-        )
-        |> Enum.reduce({[], []}, fn
-          {:ok, iter_result}, acc ->
-            Enum.reduce(iter_result, acc, fn
-              nil, acc -> acc
-              [x, y, z], {idx, upd} -> {[[x, y] | idx], [z | upd]}
-            end)
-        end)
-        |> then(fn {idx, upd} ->
-          Nx.indexed_put(acc, Nx.tensor(idx), Nx.tensor(upd))
-        end)
-      end)
+    if vectorizer.binary do
+      Nx.select(Nx.greater(tf, 0), 1, 0)
+    else
+      tf
+    end
+  end
 
-    tf =
-      case vectorizer.max_features do
-        nil ->
-          tf
+  @doc """
+  Given a `CountVectorizer`, fits the vectorizer to a corpus and then transforms the corpus into
+  a term frequency matrix. This is equivalent to calling `CountVectorizer.fit/2` and then calling
+  `CountVectorizer.transform/2` on the same corpus, but is more efficient since the term frequency
+  matrix is computed during the fitting process and is not recomputed during the transformation process.
 
-        max_features ->
-          tf
-          |> Nx.sum(axes: [0])
-          |> Nx.argsort(axis: 0, direction: :desc)
-          |> then(&Nx.take(tf, &1, axis: 1))
-          |> Nx.slice_along_axis(0, max_features, axis: 1)
-      end
+  Returns a tuple containing the new CountVectorizer and the term frequency matrix.
+
+
+  """
+  def fit_transform(vectorizer = %__MODULE__{}, corpus) do
+    vectorizer = build_vocab(vectorizer, corpus)
+    n_doc = length(corpus)
+    tf = _transform(vectorizer, corpus, n_doc)
+
+    df = Scholar.Preprocessing.binarize(tf) |> Nx.sum(axes: [0])
+
+    max_doc_count =
+      if is_float(vectorizer.max_df), do: vectorizer.max_df * n_doc, else: vectorizer.max_df
+
+    min_doc_count =
+      if is_float(vectorizer.min_df), do: vectorizer.min_df * n_doc, else: vectorizer.min_df
+
+    {tf, new_vocab, removed_terms} =
+      limit_features(vectorizer, tf, df, max_doc_count, min_doc_count, vectorizer.max_features)
 
     tf =
       if vectorizer.binary do
@@ -213,51 +358,7 @@ defmodule Mighty.Preprocessing.CountVectorizer do
         tf
       end
 
-    df = Scholar.Preprocessing.binarize(tf)
-
-    # When max_df or min_df is a float, it is interpreted as a proportion of the total number of documents,
-    # so we use the mean of the document frequencies to compare against the max_df or min_df.
-
-    # When max_df or min_df is an integer, it is interpreted as an absolute count, so we use the sum of the
-    # document frequencies to compare against the max_df or min_df.
-    max_cond =
-      case vectorizer.max_df do
-        max_df when is_integer(max_df) ->
-          Nx.less_equal(Nx.sum(df, axes: [0]), max_df)
-
-        max_df when is_float(max_df) ->
-          Nx.less_equal(Nx.mean(df, axes: [0]), max_df)
-
-        _ ->
-          raise ArgumentError, "max_df must be an integer or float in the range [0.0, 1.0]"
-      end
-
-    min_cond =
-      case vectorizer.min_df do
-        min_df when is_integer(min_df) ->
-          Nx.greater_equal(Nx.sum(df, axes: [0]), min_df)
-
-        min_df when is_float(min_df) ->
-          Nx.greater_equal(Nx.mean(df, axes: [0]), min_df)
-
-        _ ->
-          raise ArgumentError, "min_df must be an integer or float in the range [0.0, 1.0]"
-      end
-
-    true_values =
-      Nx.logical_and(
-        min_cond,
-        max_cond
-      )
-
-    true_indices = Nx.argsort(true_values, axis: 0, direction: :desc)
-
-    true_count = Nx.sum(true_values) |> Nx.to_number()
-
-    tf =
-      Nx.take(tf, true_indices, axis: 1)
-      |> Nx.slice_along_axis(0, true_count, axis: 1)
-
-    tf
+    vectorizer = struct(vectorizer, vocabulary: new_vocab, pruned: removed_terms)
+    {vectorizer, tf}
   end
 end
