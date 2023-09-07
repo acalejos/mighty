@@ -272,7 +272,7 @@ defmodule Mighty.Preprocessing.CountVectorizer do
 
     corpus
     |> Enum.with_index()
-    |> Enum.chunk_every(1000)
+    |> Enum.chunk_every(2000)
     |> Enum.reduce(tf, fn chunk, acc ->
       Task.async_stream(
         chunk,
