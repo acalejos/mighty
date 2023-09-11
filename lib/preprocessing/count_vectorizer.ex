@@ -85,6 +85,7 @@ defmodule Mighty.Preprocessing.CountVectorizer do
   "this", "this document", "this is", "this the"])
   ```
   """
+  alias Mighty.Utils
 
   defstruct vocabulary: nil,
             ngram_range: {1, 1},
@@ -97,19 +98,6 @@ defmodule Mighty.Preprocessing.CountVectorizer do
             tokenizer: nil,
             pruned: nil
 
-  defp make_ngrams(tokens, ngram_range) do
-    {min_n, max_n} = ngram_range
-    n_original_tokens = length(tokens)
-
-    ngrams =
-      for n <- min_n..min(max_n, n_original_tokens),
-          i <- 0..(n_original_tokens - n) do
-        Enum.slice(tokens, i, n) |> Enum.join(" ")
-      end
-
-    ngrams
-  end
-
   defp do_process(vectorizer = %__MODULE__{}, doc) do
     {pre_mod, pre_func, pre_args} = vectorizer.preprocessor
     {token_mod, token_func, token_args} = vectorizer.tokenizer
@@ -117,7 +105,7 @@ defmodule Mighty.Preprocessing.CountVectorizer do
     doc
     |> then(fn doc -> apply(pre_mod, pre_func, [doc | pre_args]) end)
     |> then(fn doc -> apply(token_mod, token_func, [doc | token_args]) end)
-    |> make_ngrams(vectorizer.ngram_range)
+    |> Utils.ngram_range(vectorizer.ngram_range)
     |> Enum.filter(fn token ->
       if not is_nil(vectorizer.stop_words), do: token not in vectorizer.stop_words, else: true
     end)
