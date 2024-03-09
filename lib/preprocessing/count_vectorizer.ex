@@ -86,13 +86,14 @@ defmodule Mighty.Preprocessing.CountVectorizer do
   ```
   """
   alias Mighty.Utils
+  # import Nx.Defn
 
   defstruct vocabulary: nil,
             ngram_range: {1, 1},
             max_features: nil,
             min_df: 1,
             max_df: 1.0,
-            stop_words: [],
+            stop_words: MapSet.new(),
             binary: false,
             preprocessor: nil,
             tokenizer: nil,
@@ -107,7 +108,7 @@ defmodule Mighty.Preprocessing.CountVectorizer do
     |> then(fn doc -> apply(token_mod, token_func, [doc | token_args]) end)
     |> Utils.ngram_range(vectorizer.ngram_range)
     |> Enum.filter(fn token ->
-      if not is_nil(vectorizer.stop_words), do: token not in vectorizer.stop_words, else: true
+      !(vectorizer.stop_words && token in vectorizer.stop_words)
     end)
   end
 
@@ -116,10 +117,9 @@ defmodule Mighty.Preprocessing.CountVectorizer do
       case vectorizer.vocabulary do
         nil ->
           corpus
-          |> Enum.reduce([], fn doc, vocab ->
-            vocab ++ do_process(vectorizer, doc)
+          |> Enum.reduce(MapSet.new(), fn doc, vocab ->
+            MapSet.union(vocab, MapSet.new(do_process(vectorizer, doc)))
           end)
-          |> Enum.uniq()
           |> Enum.sort()
           |> Enum.with_index()
           |> Enum.into(%{})
@@ -200,7 +200,6 @@ defmodule Mighty.Preprocessing.CountVectorizer do
       end)
 
     kept_indices = where_columns(mask)
-    I
 
     if Nx.flat_size(kept_indices) == 0 do
       raise "After pruning, no terms remain. Try a lower min_df or a higher max_df."
@@ -251,49 +250,49 @@ defmodule Mighty.Preprocessing.CountVectorizer do
     struct(vectorizer, vocabulary: new_vocab, pruned: removed_terms)
   end
 
+  # defnp build(tensor, acc) do
+  #   idxs = tensor[0..1]
+  #   updates = tensor[-1]
+  #   Nx.indexed_put(acc, idxs, updates)
+  # end
+
   defp _transform(vectorizer = %__MODULE__{}, corpus, n_doc) do
     if is_nil(vectorizer.vocabulary) do
       raise "CountVectorizer must be fit to a corpus before transforming the corpus. Use CountVectorizer.fit/2 or CountVectorizer.fit_transform/2 to fit the CountVectorizer to a corpus."
     end
 
-    tf = Nx.broadcast(0, {n_doc, Enum.count(vectorizer.vocabulary)})
+    # stream = Nx.Defn.stream(&build/2, [Nx.template({3,}, :s64), Nx.broadcast(0, {n_doc, Enum.count(vectorizer.vocabulary)})])
+    vocab_vector = Map.new(vectorizer.vocabulary, fn {k, _} -> {k, 0} end)
 
-    corpus
-    |> Enum.with_index()
-    |> Enum.chunk_every(2000)
-    |> Enum.reduce(tf, fn chunk, acc ->
-      Task.async_stream(
-        chunk,
-        fn {doc, doc_idx} ->
-          doc
-          |> then(&do_process(vectorizer, &1))
-          |> Enum.reduce(
-            Map.new(vectorizer.vocabulary, fn {k, _} -> {k, 0} end),
-            fn token, acc ->
-              Map.update(acc, token, 1, &(&1 + 1))
-            end
-          )
-          |> Enum.map(fn {k, v} ->
-            case Map.get(vectorizer.vocabulary, k) do
-              nil -> nil
-              _ when v == 0 -> nil
-              idx -> [doc_idx, idx, v]
-            end
-          end)
-        end,
-        timeout: :infinity
-      )
-      |> Enum.reduce({[], []}, fn
-        {:ok, iter_result}, acc ->
-          Enum.reduce(iter_result, acc, fn
-            nil, acc -> acc
-            [x, y, z], {idx, upd} -> {[[x, y] | idx], [z | upd]}
-          end)
+    updates =
+      corpus
+      |> Enum.with_index()
+      |> Enum.chunk_every(2000)
+      |> Flow.from_enumerables()
+      |> Flow.flat_map(fn {doc, doc_idx} ->
+        do_process(vectorizer, doc)
+        |> Enum.reduce(
+          vocab_vector,
+          fn token, acc ->
+            Map.update(acc, token, 1, &(&1 + 1))
+          end
+        )
+        |> Enum.reduce([], fn {k, v}, acc ->
+          case Map.get(vectorizer.vocabulary, k) do
+            nil -> acc
+            _ when v == 0 -> acc
+            idx -> [[doc_idx, idx, v] | acc]
+          end
+        end)
       end)
-      |> then(fn {idx, upd} ->
-        Nx.indexed_put(acc, Nx.tensor(idx), Nx.tensor(upd))
-      end)
-    end)
+      |> Enum.to_list()
+      |> Nx.tensor()
+
+    indices = updates[[.., 0..1]]
+    values = updates[[.., -1]]
+
+    Nx.broadcast(0, {n_doc, Enum.count(vectorizer.vocabulary)})
+    |> Nx.indexed_put(indices, values)
   end
 
   @doc """

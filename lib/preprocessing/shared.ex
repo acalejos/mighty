@@ -1,4 +1,5 @@
 defmodule Mighty.Preprocessing.Shared do
+  import Exterval
   @moduledoc false
   vectorizer_schema_opts = [
     ngram_range: [
@@ -20,7 +21,7 @@ defmodule Mighty.Preprocessing.Shared do
       """
     ],
     min_df: [
-      type: {:or, [:non_neg_integer, {:custom, __MODULE__, :in_range, [:closed, 0, 1, :closed]}]},
+      type: {:or, [:non_neg_integer, {:in, ~i<[0,1]>}]},
       default: 1,
       doc: """
       When building the vocabulary ignore terms that have a document frequency strictly lower than the given threshold.
@@ -30,7 +31,7 @@ defmodule Mighty.Preprocessing.Shared do
       """
     ],
     max_df: [
-      type: {:or, [:non_neg_integer, {:custom, __MODULE__, :in_range, [:closed, 0, 1, :closed]}]},
+      type: {:or, [:non_neg_integer, {:in, ~i<[0,1]>}]},
       default: 1.0,
       doc: """
       When building the vocabulary ignore terms that have a document frequency strictly higher than the given threshold.
@@ -40,7 +41,7 @@ defmodule Mighty.Preprocessing.Shared do
       """
     ],
     stop_words: [
-      type: {:list, :string},
+      type: {:custom, __MODULE__, :validate_stop_words, []},
       default: [],
       doc: """
       If `stop_words` is `nil`, no stop words will be used.
@@ -194,37 +195,14 @@ defmodule Mighty.Preprocessing.Shared do
       do: {:error, "ngram_range must be a tuple of length 2"}
   end
 
-  def in_range(value, left_bracket, min, max, right_bracket) do
-    in_range? =
-      case {left_bracket, min, max, right_bracket} do
-        {_, nil, nil, _} ->
-          true
+  def validate_stop_words(stop_words) when is_list(stop_words) do
+    unless Enum.all?(stop_words, &is_binary/1),
+      do: {:error, "stop_words must only consist of strings"}
 
-        {_, nil, max, :closed} ->
-          value <= max
+    {:ok, MapSet.new(stop_words)}
+  end
 
-        {_, nil, max, :open} ->
-          value < max
-
-        {:closed, min, nil, _} ->
-          value >= min
-
-        {:open, min, nil, _} ->
-          value > min
-
-        {:closed, min, max, :closed} ->
-          value >= min and value <= max
-
-        {:open, min, max, :closed} ->
-          value > min and value <= max
-
-        {:closed, min, max, :open} ->
-          value >= min and value < max
-
-        {:open, min, max, :open} ->
-          value > min and value < max
-      end
-
-    if in_range?, do: {:ok, value}, else: {:error, "Value #{value} is not in range"}
+  def validate_stop_words(stop_words) do
+    {:error, "stop_words must be a list, got #{inspect(stop_words)}"}
   end
 end
