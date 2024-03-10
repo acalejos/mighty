@@ -250,49 +250,60 @@ defmodule Mighty.Preprocessing.CountVectorizer do
     struct(vectorizer, vocabulary: new_vocab, pruned: removed_terms)
   end
 
-  # defnp build(tensor, acc) do
-  #   idxs = tensor[0..1]
-  #   updates = tensor[-1]
-  #   Nx.indexed_put(acc, idxs, updates)
-  # end
-
   defp _transform(vectorizer = %__MODULE__{}, corpus, n_doc) do
     if is_nil(vectorizer.vocabulary) do
       raise "CountVectorizer must be fit to a corpus before transforming the corpus. Use CountVectorizer.fit/2 or CountVectorizer.fit_transform/2 to fit the CountVectorizer to a corpus."
     end
 
-    # stream = Nx.Defn.stream(&build/2, [Nx.template({3,}, :s64), Nx.broadcast(0, {n_doc, Enum.count(vectorizer.vocabulary)})])
-    vocab_vector = Map.new(vectorizer.vocabulary, fn {k, _} -> {k, 0} end)
-
     updates =
       corpus
       |> Enum.with_index()
-      |> Enum.chunk_every(2000)
+      |> Enum.chunk_every(500)
       |> Flow.from_enumerables()
-      |> Flow.flat_map(fn {doc, doc_idx} ->
-        do_process(vectorizer, doc)
-        |> Enum.reduce(
-          vocab_vector,
-          fn token, acc ->
-            Map.update(acc, token, 1, &(&1 + 1))
-          end
-        )
-        |> Enum.reduce([], fn {k, v}, acc ->
-          case Map.get(vectorizer.vocabulary, k) do
-            nil -> acc
-            _ when v == 0 -> acc
-            idx -> [[doc_idx, idx, v] | acc]
-          end
-        end)
-      end)
+      |> Flow.map(fn {doc, doc_idx} ->
+        freqs =
+          do_process(vectorizer, doc)
+          |> Enum.frequencies()
+
+        encoding =
+          freqs
+          |> Enum.filter(&Map.has_key?(vectorizer.vocabulary, elem(&1,0)))
+          |> Enum.map(fn {token, count} ->
+            index = Map.get(vectorizer.vocabulary, token)
+            offset = index * 64
+            {offset, count}
+          end)
+          |> Enum.sort_by(fn {off, _} -> off end)
+          |> Enum.map_reduce(0, fn {next_offset, upds}, previous_offset ->
+            {{
+              previous_offset ,
+              next_offset,
+              upds
+            }, next_offset + 64}
+          end)
+          |> elem(0)
+          |> Enum.map(fn {previous, current, update} ->
+            if previous == 0 do
+              <<0::size(current)-native, update::64-native>>
+            else
+              previous_size =  (current - previous)
+              <<0::size(previous_size)-native, update::64-native>>
+            end
+          end)
+          |> then(fn b ->
+            current_num_elements = div(IO.iodata_length(b), 8) #|> IO.inspect(label: "Current Num Elements")
+            num_zeros = (map_size(vectorizer.vocabulary) - current_num_elements) * 64 # |> IO.inspect(label: "Num Zeros")
+            IO.iodata_to_binary([b, <<0::size(num_zeros)-native>>])
+          end)
+        {doc_idx,encoding}
+      end
+      )
       |> Enum.to_list()
-      |> Nx.tensor()
-
-    indices = updates[[.., 0..1]]
-    values = updates[[.., -1]]
-
-    Nx.broadcast(0, {n_doc, Enum.count(vectorizer.vocabulary)})
-    |> Nx.indexed_put(indices, values)
+      |> List.keysort(0)
+      |> Enum.map(&elem(&1,1))
+      |> IO.iodata_to_binary()
+      |> Nx.from_binary(:s64)
+      |> Nx.reshape({n_doc, :auto})
   end
 
   @doc """
@@ -327,6 +338,8 @@ defmodule Mighty.Preprocessing.CountVectorizer do
     n_doc = length(corpus)
     tf = _transform(vectorizer, corpus, n_doc)
 
+    IO.inspect(tf)
+
     df = Scholar.Preprocessing.binarize(tf) |> Nx.sum(axes: [0])
 
     max_doc_count =
@@ -335,17 +348,17 @@ defmodule Mighty.Preprocessing.CountVectorizer do
     min_doc_count =
       if is_float(vectorizer.min_df), do: vectorizer.min_df * n_doc, else: vectorizer.min_df
 
-    {tf, new_vocab, removed_terms} =
-      limit_features(vectorizer, tf, df, max_doc_count, min_doc_count, vectorizer.max_features)
+    # {tf, new_vocab, removed_terms} =
+    #   limit_features(vectorizer, tf, df, max_doc_count, min_doc_count, vectorizer.max_features)
 
-    tf =
-      if vectorizer.binary do
-        Nx.select(Nx.greater(tf, 0), 1, 0)
-      else
-        tf
-      end
+    # tf =
+    #   if vectorizer.binary do
+    #     Nx.select(Nx.greater(tf, 0), 1, 0)
+    #   else
+    #     tf
+    #   end
 
-    vectorizer = struct(vectorizer, vocabulary: new_vocab, pruned: removed_terms)
+    #vectorizer = struct(vectorizer, vocabulary: new_vocab, pruned: removed_terms)
     {vectorizer, tf}
   end
 end
