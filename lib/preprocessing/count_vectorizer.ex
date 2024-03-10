@@ -86,7 +86,6 @@ defmodule Mighty.Preprocessing.CountVectorizer do
   ```
   """
   alias Mighty.Utils
-  # import Nx.Defn
 
   defstruct vocabulary: nil,
             ngram_range: {1, 1},
@@ -155,7 +154,9 @@ defmodule Mighty.Preprocessing.CountVectorizer do
          limit
        ) do
     mask = Nx.broadcast(1, {df_len})
+
     mask = if high, do: Nx.logical_and(mask, Nx.less_equal(df, high)), else: mask
+
     mask = if low, do: Nx.logical_and(mask, Nx.greater_equal(df, low)), else: mask
 
     limit =
@@ -171,7 +172,7 @@ defmodule Mighty.Preprocessing.CountVectorizer do
       end
 
     mask =
-      if limit && Nx.greater(Nx.sum(mask), limit) do
+      if limit && Nx.to_number(Nx.greater(Nx.sum(mask), limit)) == 1 do
         tfs = Nx.sum(tf, axes: [0]) |> Nx.flatten()
         orig_mask_inds = where_columns(mask)
         mask_inds = Nx.argsort(Nx.take(tfs, orig_mask_inds) |> Nx.multiply(-1))[0..limit]
@@ -185,14 +186,16 @@ defmodule Mighty.Preprocessing.CountVectorizer do
         mask
       end
 
-    new_indices = mask |> Nx.flatten() |> Nx.cumulative_sum() |> Nx.subtract(1)
+    new_indices = mask |> Nx.flatten() |> Nx.cumulative_sum() |> Nx.subtract(1) |> Nx.to_list()
+
+    mask_l = Nx.to_list(mask)
 
     {new_vocab, removed_terms} =
       Enum.reduce(vectorizer.vocabulary, {%{}, MapSet.new([])}, fn {term, old_index},
                                                                    {vocab_acc, removed_acc} ->
-        case Nx.to_number(mask[old_index]) do
+        case Enum.fetch!(mask_l, old_index) do
           1 ->
-            {Map.put(vocab_acc, term, Nx.to_number(new_indices[old_index])), removed_acc}
+            {Map.put(vocab_acc, term, Enum.fetch!(new_indices, old_index)), removed_acc}
 
           _ ->
             {vocab_acc, MapSet.put(removed_acc, term)}
@@ -255,7 +258,7 @@ defmodule Mighty.Preprocessing.CountVectorizer do
       raise "CountVectorizer must be fit to a corpus before transforming the corpus. Use CountVectorizer.fit/2 or CountVectorizer.fit_transform/2 to fit the CountVectorizer to a corpus."
     end
 
-    num_chunks = div(length(corpus),System.schedulers_online())
+    num_chunks = div(length(corpus), System.schedulers_online())
 
     updates =
       corpus
@@ -269,7 +272,7 @@ defmodule Mighty.Preprocessing.CountVectorizer do
 
         encoding =
           freqs
-          |> Enum.filter(&Map.has_key?(vectorizer.vocabulary, elem(&1,0)))
+          |> Enum.filter(&Map.has_key?(vectorizer.vocabulary, elem(&1, 0)))
           |> Enum.map(fn {token, count} ->
             index = Map.get(vectorizer.vocabulary, token)
             offset = index * 64
@@ -278,31 +281,31 @@ defmodule Mighty.Preprocessing.CountVectorizer do
           |> Enum.sort_by(fn {off, _} -> off end)
           |> Enum.map_reduce(0, fn {next_offset, upds}, previous_offset ->
             {{
-              previous_offset ,
-              next_offset,
-              upds
-            }, next_offset + 64}
+               previous_offset,
+               next_offset,
+               upds
+             }, next_offset + 64}
           end)
           |> elem(0)
           |> Enum.map(fn {previous, current, update} ->
             if previous == 0 do
               <<0::size(current)-native, update::64-native>>
             else
-              previous_size =  (current - previous)
+              previous_size = current - previous
               <<0::size(previous_size)-native, update::64-native>>
             end
           end)
           |> then(fn b ->
-            current_num_elements = div(IO.iodata_length(b), 8) #|> IO.inspect(label: "Current Num Elements")
-            num_zeros = (map_size(vectorizer.vocabulary) - current_num_elements) * 64 # |> IO.inspect(label: "Num Zeros")
+            current_num_elements = div(IO.iodata_length(b), 8)
+            num_zeros = (map_size(vectorizer.vocabulary) - current_num_elements) * 64
             IO.iodata_to_binary([b, <<0::size(num_zeros)-native>>])
           end)
-        {doc_idx,encoding}
-      end
-      )
+
+        {doc_idx, encoding}
+      end)
       |> Enum.to_list()
       |> List.keysort(0)
-      |> Enum.map(&elem(&1,1))
+      |> Enum.map(&elem(&1, 1))
       |> IO.iodata_to_binary()
       |> Nx.from_binary(:s64)
       |> Nx.reshape({n_doc, :auto})
