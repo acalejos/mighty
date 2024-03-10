@@ -255,11 +255,13 @@ defmodule Mighty.Preprocessing.CountVectorizer do
       raise "CountVectorizer must be fit to a corpus before transforming the corpus. Use CountVectorizer.fit/2 or CountVectorizer.fit_transform/2 to fit the CountVectorizer to a corpus."
     end
 
+    num_chunks = div(length(corpus),System.schedulers_online())
+
     updates =
       corpus
       |> Enum.with_index()
-      |> Enum.chunk_every(500)
-      |> Flow.from_enumerables()
+      |> Enum.chunk_every(num_chunks)
+      |> Flow.from_enumerables(max_demand: 10, min_demand: 1)
       |> Flow.map(fn {doc, doc_idx} ->
         freqs =
           do_process(vectorizer, doc)
@@ -338,8 +340,6 @@ defmodule Mighty.Preprocessing.CountVectorizer do
     n_doc = length(corpus)
     tf = _transform(vectorizer, corpus, n_doc)
 
-    IO.inspect(tf)
-
     df = Scholar.Preprocessing.binarize(tf) |> Nx.sum(axes: [0])
 
     max_doc_count =
@@ -348,17 +348,17 @@ defmodule Mighty.Preprocessing.CountVectorizer do
     min_doc_count =
       if is_float(vectorizer.min_df), do: vectorizer.min_df * n_doc, else: vectorizer.min_df
 
-    # {tf, new_vocab, removed_terms} =
-    #   limit_features(vectorizer, tf, df, max_doc_count, min_doc_count, vectorizer.max_features)
+    {tf, new_vocab, removed_terms} =
+      limit_features(vectorizer, tf, df, max_doc_count, min_doc_count, vectorizer.max_features)
 
-    # tf =
-    #   if vectorizer.binary do
-    #     Nx.select(Nx.greater(tf, 0), 1, 0)
-    #   else
-    #     tf
-    #   end
+    tf =
+      if vectorizer.binary do
+        Nx.select(Nx.greater(tf, 0), 1, 0)
+      else
+        tf
+      end
 
-    #vectorizer = struct(vectorizer, vocabulary: new_vocab, pruned: removed_terms)
+    vectorizer = struct(vectorizer, vocabulary: new_vocab, pruned: removed_terms)
     {vectorizer, tf}
   end
 end
