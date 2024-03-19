@@ -258,57 +258,56 @@ defmodule Mighty.Preprocessing.CountVectorizer do
       raise "CountVectorizer must be fit to a corpus before transforming the corpus. Use CountVectorizer.fit/2 or CountVectorizer.fit_transform/2 to fit the CountVectorizer to a corpus."
     end
 
-    num_chunks = div(length(corpus), System.schedulers_online())
+    num_chunks = max(1, div(length(corpus), System.schedulers_online()))
 
-    updates =
-      corpus
-      |> Enum.with_index()
-      |> Enum.chunk_every(num_chunks)
-      |> Flow.from_enumerables(max_demand: 10, min_demand: 1)
-      |> Flow.map(fn {doc, doc_idx} ->
-        freqs =
-          do_process(vectorizer, doc)
-          |> Enum.frequencies()
+    corpus
+    |> Enum.with_index()
+    |> Enum.chunk_every(num_chunks)
+    |> Flow.from_enumerables(max_demand: 10, min_demand: 1)
+    |> Flow.map(fn {doc, doc_idx} ->
+      freqs =
+        do_process(vectorizer, doc)
+        |> Enum.frequencies()
 
-        encoding =
-          freqs
-          |> Enum.filter(&Map.has_key?(vectorizer.vocabulary, elem(&1, 0)))
-          |> Enum.map(fn {token, count} ->
-            index = Map.get(vectorizer.vocabulary, token)
-            offset = index * 64
-            {offset, count}
-          end)
-          |> Enum.sort_by(fn {off, _} -> off end)
-          |> Enum.map_reduce(0, fn {next_offset, upds}, previous_offset ->
-            {{
-               previous_offset,
-               next_offset,
-               upds
-             }, next_offset + 64}
-          end)
-          |> elem(0)
-          |> Enum.map(fn {previous, current, update} ->
-            if previous == 0 do
-              <<0::size(current)-native, update::64-native>>
-            else
-              previous_size = current - previous
-              <<0::size(previous_size)-native, update::64-native>>
-            end
-          end)
-          |> then(fn b ->
-            current_num_elements = div(IO.iodata_length(b), 8)
-            num_zeros = (map_size(vectorizer.vocabulary) - current_num_elements) * 64
-            IO.iodata_to_binary([b, <<0::size(num_zeros)-native>>])
-          end)
+      encoding =
+        freqs
+        |> Enum.filter(&Map.has_key?(vectorizer.vocabulary, elem(&1, 0)))
+        |> Enum.map(fn {token, count} ->
+          index = Map.get(vectorizer.vocabulary, token)
+          offset = index * 64
+          {offset, count}
+        end)
+        |> Enum.sort_by(fn {off, _} -> off end)
+        |> Enum.map_reduce(0, fn {next_offset, upds}, previous_offset ->
+          {{
+             previous_offset,
+             next_offset,
+             upds
+           }, next_offset + 64}
+        end)
+        |> elem(0)
+        |> Enum.map(fn {previous, current, update} ->
+          if previous == 0 do
+            <<0::size(current)-native, update::64-native>>
+          else
+            previous_size = current - previous
+            <<0::size(previous_size)-native, update::64-native>>
+          end
+        end)
+        |> then(fn b ->
+          current_num_elements = div(IO.iodata_length(b), 8)
+          num_zeros = (map_size(vectorizer.vocabulary) - current_num_elements) * 64
+          IO.iodata_to_binary([b, <<0::size(num_zeros)-native>>])
+        end)
 
-        {doc_idx, encoding}
-      end)
-      |> Enum.to_list()
-      |> List.keysort(0)
-      |> Enum.map(&elem(&1, 1))
-      |> IO.iodata_to_binary()
-      |> Nx.from_binary(:s64)
-      |> Nx.reshape({n_doc, :auto})
+      {doc_idx, encoding}
+    end)
+    |> Enum.to_list()
+    |> List.keysort(0)
+    |> Enum.map(&elem(&1, 1))
+    |> IO.iodata_to_binary()
+    |> Nx.from_binary(:s64)
+    |> Nx.reshape({n_doc, :auto})
   end
 
   @doc """

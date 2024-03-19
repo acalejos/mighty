@@ -1,6 +1,5 @@
 defmodule Mighty.Utils do
-  def ngram_range(tokens, nrange) do
-    {min_n, max_n} = nrange
+  def ngram_range(tokens, {min_n, max_n}) do
     n_original_tokens = length(tokens)
 
     ngrams =
@@ -69,19 +68,13 @@ defmodule Mighty.Utils do
 
     case {pad_left, pad_right} do
       {true, true} ->
-        Stream.repeatedly(fn -> left_pad_symbol end)
-        |> Enum.take(n)
-        |> Enum.concat(sequence)
-        |> Enum.concat(Stream.repeatedly(fn -> right_pad_symbol end) |> Enum.take(n))
+        List.duplicate(left_pad_symbol, n) ++ sequence ++ List.duplicate(right_pad_symbol, n)
 
       {true, false} ->
-        Stream.repeatedly(fn -> left_pad_symbol end)
-        |> Enum.take(n)
-        |> Enum.concat(sequence)
+        List.duplicate(left_pad_symbol, n) ++ sequence
 
       {false, true} ->
-        sequence
-        |> Enum.concat(Stream.repeatedly(fn -> right_pad_symbol end) |> Enum.take(n))
+        sequence ++ List.duplicate(right_pad_symbol, n)
 
       {false, false} ->
         sequence
