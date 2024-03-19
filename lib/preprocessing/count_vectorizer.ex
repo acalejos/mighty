@@ -85,30 +85,18 @@ defmodule Mighty.Preprocessing.CountVectorizer do
   "this", "this document", "this is", "this the"])
   ```
   """
+  alias Mighty.Utils
 
   defstruct vocabulary: nil,
             ngram_range: {1, 1},
             max_features: nil,
             min_df: 1,
             max_df: 1.0,
-            stop_words: [],
+            stop_words: MapSet.new(),
             binary: false,
             preprocessor: nil,
             tokenizer: nil,
             pruned: nil
-
-  defp make_ngrams(tokens, ngram_range) do
-    {min_n, max_n} = ngram_range
-    n_original_tokens = length(tokens)
-
-    ngrams =
-      for n <- min_n..min(max_n, n_original_tokens),
-          i <- 0..(n_original_tokens - n) do
-        Enum.slice(tokens, i, n) |> Enum.join(" ")
-      end
-
-    ngrams
-  end
 
   defp do_process(vectorizer = %__MODULE__{}, doc) do
     {pre_mod, pre_func, pre_args} = vectorizer.preprocessor
@@ -117,9 +105,9 @@ defmodule Mighty.Preprocessing.CountVectorizer do
     doc
     |> then(fn doc -> apply(pre_mod, pre_func, [doc | pre_args]) end)
     |> then(fn doc -> apply(token_mod, token_func, [doc | token_args]) end)
-    |> make_ngrams(vectorizer.ngram_range)
+    |> Utils.ngram_range(vectorizer.ngram_range)
     |> Enum.filter(fn token ->
-      if not is_nil(vectorizer.stop_words), do: token not in vectorizer.stop_words, else: true
+      !(vectorizer.stop_words && token in vectorizer.stop_words)
     end)
   end
 
@@ -128,10 +116,9 @@ defmodule Mighty.Preprocessing.CountVectorizer do
       case vectorizer.vocabulary do
         nil ->
           corpus
-          |> Enum.reduce([], fn doc, vocab ->
-            vocab ++ do_process(vectorizer, doc)
+          |> Enum.reduce(MapSet.new(), fn doc, vocab ->
+            MapSet.union(vocab, MapSet.new(do_process(vectorizer, doc)))
           end)
-          |> Enum.uniq()
           |> Enum.sort()
           |> Enum.with_index()
           |> Enum.into(%{})
@@ -167,7 +154,9 @@ defmodule Mighty.Preprocessing.CountVectorizer do
          limit
        ) do
     mask = Nx.broadcast(1, {df_len})
+
     mask = if high, do: Nx.logical_and(mask, Nx.less_equal(df, high)), else: mask
+
     mask = if low, do: Nx.logical_and(mask, Nx.greater_equal(df, low)), else: mask
 
     limit =
@@ -183,7 +172,7 @@ defmodule Mighty.Preprocessing.CountVectorizer do
       end
 
     mask =
-      if limit && Nx.greater(Nx.sum(mask), limit) do
+      if limit && Nx.to_number(Nx.greater(Nx.sum(mask), limit)) == 1 do
         tfs = Nx.sum(tf, axes: [0]) |> Nx.flatten()
         orig_mask_inds = where_columns(mask)
         mask_inds = Nx.argsort(Nx.take(tfs, orig_mask_inds) |> Nx.multiply(-1))[0..limit]
@@ -197,14 +186,16 @@ defmodule Mighty.Preprocessing.CountVectorizer do
         mask
       end
 
-    new_indices = mask |> Nx.flatten() |> Nx.cumulative_sum() |> Nx.subtract(1)
+    new_indices = mask |> Nx.flatten() |> Nx.cumulative_sum() |> Nx.subtract(1) |> Nx.to_list()
+
+    mask_l = Nx.to_list(mask)
 
     {new_vocab, removed_terms} =
       Enum.reduce(vectorizer.vocabulary, {%{}, MapSet.new([])}, fn {term, old_index},
                                                                    {vocab_acc, removed_acc} ->
-        case Nx.to_number(mask[old_index]) do
+        case Enum.fetch!(mask_l, old_index) do
           1 ->
-            {Map.put(vocab_acc, term, Nx.to_number(new_indices[old_index])), removed_acc}
+            {Map.put(vocab_acc, term, Enum.fetch!(new_indices, old_index)), removed_acc}
 
           _ ->
             {vocab_acc, MapSet.put(removed_acc, term)}
@@ -212,7 +203,6 @@ defmodule Mighty.Preprocessing.CountVectorizer do
       end)
 
     kept_indices = where_columns(mask)
-    I
 
     if Nx.flat_size(kept_indices) == 0 do
       raise "After pruning, no terms remain. Try a lower min_df or a higher max_df."
@@ -268,44 +258,56 @@ defmodule Mighty.Preprocessing.CountVectorizer do
       raise "CountVectorizer must be fit to a corpus before transforming the corpus. Use CountVectorizer.fit/2 or CountVectorizer.fit_transform/2 to fit the CountVectorizer to a corpus."
     end
 
-    tf = Nx.broadcast(0, {n_doc, Enum.count(vectorizer.vocabulary)})
+    num_chunks = max(1, div(length(corpus), System.schedulers_online()))
 
     corpus
     |> Enum.with_index()
-    |> Enum.chunk_every(2000)
-    |> Enum.reduce(tf, fn chunk, acc ->
-      Task.async_stream(
-        chunk,
-        fn {doc, doc_idx} ->
-          doc
-          |> then(&do_process(vectorizer, &1))
-          |> Enum.reduce(
-            Map.new(vectorizer.vocabulary, fn {k, _} -> {k, 0} end),
-            fn token, acc ->
-              Map.update(acc, token, 1, &(&1 + 1))
-            end
-          )
-          |> Enum.map(fn {k, v} ->
-            case Map.get(vectorizer.vocabulary, k) do
-              nil -> nil
-              _ when v == 0 -> nil
-              idx -> [doc_idx, idx, v]
-            end
-          end)
-        end,
-        timeout: :infinity
-      )
-      |> Enum.reduce({[], []}, fn
-        {:ok, iter_result}, acc ->
-          Enum.reduce(iter_result, acc, fn
-            nil, acc -> acc
-            [x, y, z], {idx, upd} -> {[[x, y] | idx], [z | upd]}
-          end)
-      end)
-      |> then(fn {idx, upd} ->
-        Nx.indexed_put(acc, Nx.tensor(idx), Nx.tensor(upd))
-      end)
+    |> Enum.chunk_every(num_chunks)
+    |> Flow.from_enumerables(max_demand: 10, min_demand: 1)
+    |> Flow.map(fn {doc, doc_idx} ->
+      freqs =
+        do_process(vectorizer, doc)
+        |> Enum.frequencies()
+
+      encoding =
+        freqs
+        |> Enum.filter(&Map.has_key?(vectorizer.vocabulary, elem(&1, 0)))
+        |> Enum.map(fn {token, count} ->
+          index = Map.get(vectorizer.vocabulary, token)
+          offset = index * 64
+          {offset, count}
+        end)
+        |> Enum.sort_by(fn {off, _} -> off end)
+        |> Enum.map_reduce(0, fn {next_offset, upds}, previous_offset ->
+          {{
+             previous_offset,
+             next_offset,
+             upds
+           }, next_offset + 64}
+        end)
+        |> elem(0)
+        |> Enum.map(fn {previous, current, update} ->
+          if previous == 0 do
+            <<0::size(current)-native, update::64-native>>
+          else
+            previous_size = current - previous
+            <<0::size(previous_size)-native, update::64-native>>
+          end
+        end)
+        |> then(fn b ->
+          current_num_elements = div(IO.iodata_length(b), 8)
+          num_zeros = (map_size(vectorizer.vocabulary) - current_num_elements) * 64
+          IO.iodata_to_binary([b, <<0::size(num_zeros)-native>>])
+        end)
+
+      {doc_idx, encoding}
     end)
+    |> Enum.to_list()
+    |> List.keysort(0)
+    |> Enum.map(&elem(&1, 1))
+    |> IO.iodata_to_binary()
+    |> Nx.from_binary(:s64)
+    |> Nx.reshape({n_doc, :auto})
   end
 
   @doc """
