@@ -265,12 +265,10 @@ defmodule Mighty.Preprocessing.CountVectorizer do
     |> Enum.chunk_every(num_chunks)
     |> Flow.from_enumerables(max_demand: 10, min_demand: 1)
     |> Flow.map(fn {doc, doc_idx} ->
-      freqs =
-        do_process(vectorizer, doc)
+      [{first_offset, update} | tail] =
+        vectorizer
+        |> do_process(doc)
         |> Enum.frequencies()
-
-      encoding =
-        freqs
         |> Enum.filter(&Map.has_key?(vectorizer.vocabulary, elem(&1, 0)))
         |> Enum.map(fn {token, count} ->
           index = Map.get(vectorizer.vocabulary, token)
@@ -278,20 +276,31 @@ defmodule Mighty.Preprocessing.CountVectorizer do
           {offset, count}
         end)
         |> Enum.sort_by(fn {off, _} -> off end)
-        |> Enum.map_reduce(0, fn {next_offset, upds}, previous_offset ->
+
+      {t, _} =
+        tail
+        |> Enum.map_reduce(first_offset, fn {next_offset, upds}, previous_offset ->
           {{
              previous_offset,
              next_offset,
              upds
-           }, next_offset + 64}
+           }, next_offset}
         end)
-        |> elem(0)
+
+      encoding =
+        [{0, first_offset, update} | t]
         |> Enum.map(fn {previous, current, update} ->
-          if previous == 0 do
-            <<0::size(current)-native, update::64-native>>
-          else
-            previous_size = current - previous
-            <<0::size(previous_size)-native, update::64-native>>
+          cond do
+            previous == current ->
+              <<update::64-native>>
+
+            previous == 0 ->
+              <<0::size(current - if(first_offset == 0, do: 64, else: 0))-native,
+                update::64-native>>
+
+            true ->
+              previous_size = current - previous - 64
+              <<0::size(previous_size)-native, update::64-native>>
           end
         end)
         |> then(fn b ->
