@@ -186,7 +186,8 @@ defmodule Mighty.Preprocessing.CountVectorizer do
         mask
       end
 
-    new_indices = mask |> Nx.flatten() |> Nx.cumulative_sum() |> Nx.subtract(1) |> Nx.to_list()
+    new_indices =
+      mask |> Nx.flatten() |> Nx.cumulative_sum() |> Nx.subtract(1) |> Nx.to_list()
 
     mask_l = Nx.to_list(mask)
 
@@ -264,52 +265,65 @@ defmodule Mighty.Preprocessing.CountVectorizer do
     |> Enum.with_index()
     |> Enum.chunk_every(num_chunks)
     |> Flow.from_enumerables(max_demand: 10, min_demand: 1)
-    |> Flow.map(fn {doc, doc_idx} ->
-      [{first_offset, update} | tail] =
-        vectorizer
-        |> do_process(doc)
-        |> Enum.frequencies()
-        |> Enum.filter(&Map.has_key?(vectorizer.vocabulary, elem(&1, 0)))
-        |> Enum.map(fn {token, count} ->
-          index = Map.get(vectorizer.vocabulary, token)
-          offset = index * 64
-          {offset, count}
-        end)
-        |> Enum.sort_by(fn {off, _} -> off end)
+    |> Flow.map(fn
+      {doc, doc_idx} ->
+        filtered_tokens =
+          vectorizer
+          |> do_process(doc)
+          |> Enum.frequencies()
+          |> Enum.filter(&Map.has_key?(vectorizer.vocabulary, elem(&1, 0)))
+          |> Enum.map(fn {token, count} ->
+            index = Map.get(vectorizer.vocabulary, token)
+            offset = index * 64
+            {offset, count}
+          end)
+          |> Enum.sort_by(fn {off, _} -> off end)
 
-      {t, _} =
-        tail
-        |> Enum.map_reduce(first_offset, fn {next_offset, upds}, previous_offset ->
-          {{
-             previous_offset,
-             next_offset,
-             upds
-           }, next_offset}
-        end)
+        case filtered_tokens do
+          [{first_offset, update} | tail] ->
+            {t, _} =
+              tail
+              |> Enum.map_reduce(first_offset, fn {next_offset, upds}, previous_offset ->
+                {{
+                   previous_offset,
+                   next_offset,
+                   upds
+                 }, next_offset}
+              end)
 
-      encoding =
-        [{0, first_offset, update} | t]
-        |> Enum.map(fn {previous, current, update} ->
-          cond do
-            previous == current ->
-              <<update::64-native>>
+            encoding =
+              [{0, first_offset, update} | t]
+              |> Enum.map(fn {previous, current, update} ->
+                cond do
+                  previous == current ->
+                    <<update::64-native>>
 
-            previous == 0 ->
-              <<0::size(current - if(first_offset == 0, do: 64, else: 0))-native,
-                update::64-native>>
+                  previous == 0 ->
+                    <<0::size(current - if(first_offset == 0, do: 64, else: 0))-native,
+                      update::64-native>>
 
-            true ->
-              previous_size = current - previous - 64
-              <<0::size(previous_size)-native, update::64-native>>
-          end
-        end)
-        |> then(fn b ->
-          current_num_elements = div(IO.iodata_length(b), 8)
-          num_zeros = (map_size(vectorizer.vocabulary) - current_num_elements) * 64
-          IO.iodata_to_binary([b, <<0::size(num_zeros)-native>>])
-        end)
+                  true ->
+                    previous_size =
+                      current - previous - 64
 
-      {doc_idx, encoding}
+                    <<0::size(previous_size)-native, update::64-native>>
+                end
+              end)
+              |> then(fn b ->
+                current_num_elements = div(IO.iodata_length(b), 8)
+                num_zeros = (map_size(vectorizer.vocabulary) - current_num_elements) * 64
+                IO.iodata_to_binary([b, <<0::size(num_zeros)-native>>])
+              end)
+
+            {doc_idx, encoding}
+
+          _ ->
+            # If all items have been filtered out, return a 0 vector
+            {doc_idx, <<0::size(map_size(vectorizer.vocabulary) * 64)-native>>}
+        end
+
+      _ ->
+        nil
     end)
     |> Enum.to_list()
     |> List.keysort(0)
